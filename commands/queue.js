@@ -15,13 +15,13 @@ module.exports = {
         let queueText = '';
         
         if (queueInfo.current) {
-            queueText += `**🎶 Tocando agora:** ${queueInfo.current.title || 'Música'} (por ${queueInfo.current.requestedBy})\n\n`;
+            queueText += `**🎶 Tocando agora:** ${queueInfo.current.title} (por ${queueInfo.current.requestedBy})\n\n`;
         }
 
         if (queueInfo.queue.length > 0) {
             queueText += '**📋 Próximas na fila:**\n';
             queueInfo.queue.forEach((song, index) => {
-                queueText += `**${index + 1}.** ${song.title || 'Música'} (por ${song.requestedBy})\n`;
+                queueText += `**${index + 1}.** ${song.title} (por ${song.requestedBy})\n`;
             });
         } else {
             queueText += '\n📭 | Nenhuma música na fila.';
