@@ -1,0 +1,20 @@
+{
+  "name": "music-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@discordjs/voice": "^0.17.0",
+    "axios": "^1.13.2",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "play-dl": "^1.9.7",
+    "sodium-native": "^4.2.1"
+  }
+}
