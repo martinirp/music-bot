@@ -11,7 +11,10 @@ class QueueManager {
         this.connections = new Map();
         this.players = new Map();
         this.downloadQueue = new Map();
-        this.cacheLimit = 10;
+        
+        // 🔧 CACHE LIMIT CONFIGURÁVEL
+        this.cacheLimit = 30;
+        
         this.cacheIndex = new Map();
         this.cacheCounter = 0;
         this.stats = {
@@ -20,6 +23,8 @@ class QueueManager {
             cacheMisses: 0,
             errors: 0
         };
+        
+        console.log(`🎯 Cache limit configurado para: ${this.cacheLimit} músicas`);
     }
 
     getQueue(guildId) {
@@ -35,12 +40,16 @@ class QueueManager {
         return this.queues.get(guildId);
     }
 
-    getCacheFilePath(videoId) {
+    getCacheFilePath(songInfo) {
         const tempDir = './music_cache';
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
         }
-        return path.join(tempDir, `${videoId}.mp3`);
+        
+        // 🏷️ USAR TÍTULO + VIDEO_ID COMO NOME DO ARQUIVO
+        const dibuiador = require('./dibuiador');
+        const fileName = dibuiador.encodeFileName(songInfo.title, songInfo.videoId);
+        return path.join(tempDir, `${fileName}.mp3`);
     }
 
     // 🔥 RESET COMPLETO DO SERVIDOR
@@ -116,10 +125,10 @@ class QueueManager {
     }
 
     // 🔄 SISTEMA DE RETRY PARA DOWNLOADS
-    async downloadToCacheWithRetry(url, videoId, maxRetries = 3) {
+    async downloadToCacheWithRetry(url, videoId, title = '', maxRetries = 3) {
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                await this.downloadToCache(url, videoId);
+                await this.downloadToCache(url, videoId, title);
                 return true;
             } catch (error) {
                 console.log(`❌ Tentativa ${attempt}/${maxRetries} falhou:`, error.message);
@@ -142,7 +151,8 @@ class QueueManager {
         queue.voiceChannel = voiceChannel;
         queue.lastActivity = Date.now();
 
-        const cacheFile = this.getCacheFilePath(songInfo.videoId);
+        // 🏷️ AGORA O NOME DO ARQUIVO INCLUI O TÍTULO
+        const cacheFile = this.getCacheFilePath(songInfo);
         songInfo.file = cacheFile;
         
         const position = queue.songs.length + 1;
@@ -152,20 +162,26 @@ class QueueManager {
             title: songInfo.title,
             position: position,
             videoId: songInfo.videoId,
-            cacheFile: path.basename(cacheFile)
+            cacheFile: path.basename(cacheFile),
+            fromCache: songInfo.fromCache || false
         });
 
-        if (!fs.existsSync(cacheFile)) {
+        // ✅ SE VEIO DO CACHE, JÁ PODE TOCAR IMEDIATAMENTE
+        if (songInfo.fromCache) {
+            console.log('⚡ Música já está em cache, pronta para tocar!');
+            this.stats.cacheHits++;
+            this.cacheIndex.set(songInfo.videoId, this.cacheCounter++);
+        } else if (!fs.existsSync(cacheFile)) {
             console.log('📥 Cache não encontrado, baixando ANTES de tocar...');
             this.stats.cacheMisses++;
-            await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId);
+            await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId, songInfo.title);
         } else {
             // Validar arquivo de cache existente
             const isValid = await this.validateCacheFile(cacheFile);
             if (!isValid) {
                 console.log('🔄 Cache inválido, baixando novamente...');
                 this.stats.cacheMisses++;
-                await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId);
+                await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId, songInfo.title);
             } else {
                 console.log('✅ MP3 já está em cache:', songInfo.title);
                 this.stats.cacheHits++;
@@ -180,7 +196,7 @@ class QueueManager {
         return position;
     }
 
-    async downloadToCache(url, videoId) {
+    async downloadToCache(url, videoId, title = '') {
         if (this.downloadQueue.has(videoId)) {
             console.log('⏳ Download já em andamento para:', videoId);
             while (this.downloadQueue.has(videoId)) {
@@ -192,8 +208,11 @@ class QueueManager {
         this.downloadQueue.set(videoId, true);
 
         try {
-            const cacheFile = this.getCacheFilePath(videoId);
-            console.log('📥 Baixando para cache permanente:', videoId);
+            // 🏷️ CRIAR songInfo TEMPORÁRIO PARA GERAR NOME DO ARQUIVO
+            const tempSongInfo = { title: title || videoId, videoId: videoId };
+            const cacheFile = this.getCacheFilePath(tempSongInfo);
+            
+            console.log('📥 Baixando para cache permanente:', title || videoId);
             
             const command = `yt-dlp -x --audio-format mp3 --audio-quality 5 --extract-audio --no-playlist --no-warnings -o "${cacheFile}" "${url}"`;
             await execPromise(command);
@@ -201,7 +220,7 @@ class QueueManager {
             this.manageCacheLimit(videoId);
             this.stats.totalDownloads++;
             
-            console.log('✅ Download para cache concluído:', videoId);
+            console.log('✅ Download para cache concluído:', title || videoId);
         } catch (error) {
             console.error('❌ Erro no download para cache:', error);
             this.stats.errors++;
@@ -226,15 +245,25 @@ class QueueManager {
             }
             
             if (oldestVideoId) {
-                const oldCacheFile = this.getCacheFilePath(oldestVideoId);
-                try {
-                    if (fs.existsSync(oldCacheFile)) {
-                        fs.unlinkSync(oldCacheFile);
-                        console.log('🗑️ Removido do cache (limite excedido):', oldestVideoId);
+                // Encontrar o arquivo correspondente no cache
+                const cacheDir = './music_cache';
+                if (fs.existsSync(cacheDir)) {
+                    const files = fs.readdirSync(cacheDir);
+                    for (const file of files) {
+                        if (file.includes(oldestVideoId)) {
+                            const oldCacheFile = path.join(cacheDir, file);
+                            try {
+                                if (fs.existsSync(oldCacheFile)) {
+                                    fs.unlinkSync(oldCacheFile);
+                                    console.log('🗑️ Removido do cache (limite excedido):', file);
+                                }
+                                this.cacheIndex.delete(oldestVideoId);
+                                break;
+                            } catch (error) {
+                                console.log('⚠️ Erro ao remover do cache:', error.message);
+                            }
+                        }
                     }
-                    this.cacheIndex.delete(oldestVideoId);
-                } catch (error) {
-                    console.log('⚠️ Erro ao remover do cache:', error.message);
                 }
             }
         }
@@ -273,7 +302,7 @@ class QueueManager {
             if (!fs.existsSync(nextSong.file)) {
                 console.log('⚡ Cache não encontrado no playNextSong, baixando...');
                 try {
-                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId);
+                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId, nextSong.title);
                 } catch (downloadError) {
                     console.error('❌ Download falhou:', downloadError);
                     throw new Error('Não foi possível baixar a música');
@@ -283,7 +312,7 @@ class QueueManager {
                 const isValid = await this.validateCacheFile(nextSong.file);
                 if (!isValid) {
                     console.log('🔄 Cache inválido, baixando novamente...');
-                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId);
+                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId, nextSong.title);
                 } else {
                     console.log('✅ Usando cache permanente:', nextSong.title);
                     this.cacheIndex.set(nextSong.videoId, this.cacheCounter++);

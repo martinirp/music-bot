@@ -15,6 +15,7 @@ const client = new Client({
 client.commands = new Collection();
 client.aliases = new Collection();
 
+
 // 🧹 GERENCIADOR DE CONTROLES
 class ControlManager {
     constructor() {

@@ -37,7 +37,8 @@ module.exports = {
                     title: title,
                     url: url,
                     videoId: videoId,
-                    query: input
+                    query: input,
+                    fromCache: false
                 };
             } else {
                 await message.channel.send('🔍 | Procurando música...');
@@ -50,8 +51,12 @@ module.exports = {
                 url = resultado.url;
                 title = resultado.title;
                 
-                console.log('✅ Música encontrada:', title);
-                await message.channel.send(`✅ | **Encontrado:** ${title}`);
+                // ⚡ FEEDBACK DE VELOCIDADE
+                if (resultado.fromCache) {
+                    await message.channel.send(`⚡ **Cache encontrado!** ${resultado.title}`);
+                } else {
+                    await message.channel.send(`✅ **Encontrado no YouTube:** ${resultado.title}`);
+                }
             }
 
             if (!url || !url.startsWith('https://')) {
@@ -65,7 +70,8 @@ module.exports = {
                 videoId: resultado.videoId,
                 requestedBy: message.author.tag,
                 channel: message.channel,
-                position: 0
+                position: 0,
+                fromCache: resultado.fromCache || false
             };
 
             const position = await queueManager.addToQueue(guildId, songInfo, voiceChannel);
@@ -78,7 +84,7 @@ module.exports = {
             if (queueInfo.total === 1) { // Se é a primeira música
                 setTimeout(async () => {
                     try {
-                        // Usar o controlManager do index.js
+                        // ✅ CORREÇÃO: Importar o controlManager do index.js
                         const controlManager = require('../index.js').controlManager;
                         if (controlManager) {
                             await controlManager.updateOrCreateControlMessage(guildId, message.channel);
