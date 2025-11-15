@@ -2,34 +2,52 @@ const queueManager = require('../utils/queueManager');
 
 module.exports = {
     name: 'skip',
-    aliases: ['s', 'pular'],
+    aliases: ['s', 'pular', 'next'],
     inVoiceChannel: true,
+
     execute: async (message, client, args) => {
+        const voiceChannel = message.member.voice.channel;
+        if (!voiceChannel) {
+            return message.channel.send('❌ | Você precisa estar em um canal de voz!');
+        }
+
         const guildId = message.guild.id;
-        const queueInfo = queueManager.getQueueInfo(guildId);
+        const queue = queueManager.getQueue(guildId);
+
+        if (!queue || !queue.isPlaying) {
+            return message.channel.send('❌ | Nenhuma música tocando no momento!');
+        }
+
+        const currentSong = queue.currentSong;
         
-        if (!queueInfo.isPlaying) {
-            return message.channel.send('❌ | Não há música tocando no momento!');
-        }
-
-        // 🔥 VERIFICAR SE HÁ PRÓXIMA MÚSICA NA FILA
-        if (queueInfo.queue.length === 0) {
-            return message.channel.send('❌ | Não há próxima música na fila!');
-        }
-
-        queueManager.skipSong(guildId);
-        message.channel.send('⏭️ | Pulando para próxima música...');
-
-        // Atualizar controles
-        setTimeout(async () => {
-            try {
-                const controlManager = require('../index.js').controlManager;
-                if (controlManager) {
-                    await controlManager.updateOrCreateControlMessage(guildId, message.channel);
-                }
-            } catch (error) {
-                console.log('⚠️ Não foi possível atualizar controles:', error.message);
+        try {
+            // Pular a música
+            queueManager.skipSong(guildId);
+            
+            // 🆕 MOSTRAR INFORMAÇÃO DA PRÓXIMA MÚSICA
+            const nextSong = queue.songs[0]; // Próxima música na fila
+            
+            if (nextSong) {
+                // Limpar título da próxima música
+                const cleanNextTitle = nextSong.title
+                    .replace(/\s*\[[^\]]*\]/g, '')
+                    .replace(/\s*\([^)]*\)/g, '')
+                    .replace(/\s*[-–].*$/, '')
+                    .trim();
+                    
+                const artistMatch = cleanNextTitle.match(/(.+?)\s+[-–]/);
+                const artist = artistMatch ? artistMatch[1].trim() : 'Unknown Artist';
+                const songName = cleanNextTitle.replace(/^.+\s[-–]\s*/, '').trim();
+                
+                await message.channel.send(`⏭️ | **Pulando...**\n🎵 | **Próxima:** ${songName} **by** ${artist}`);
+            } else {
+                await message.channel.send('⏭️ | **Pulando...**\n📭 | **Fila vazia**');
             }
-        }, 1000);
-    },
+
+        } catch (error) {
+            console.error('❌ Erro no skip:', error);
+            await message.channel.send('❌ | Erro ao pular a música!');
+        }
+    }
 };
+

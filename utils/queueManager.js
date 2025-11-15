@@ -1,488 +1,565 @@
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, entersState, VoiceConnectionStatus } = require('@discordjs/voice');
-const { exec } = require('child_process');
+// utils/queueManager.js - VERSÃO COMPLETA COM AUTOPLAY MELHORADO
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  entersState,
+  VoiceConnectionStatus
+} = require('@discordjs/voice');
+
 const fs = require('fs');
 const path = require('path');
-const util = require('util');
-const execPromise = util.promisify(exec);
+const downloadManager = require('./download');
+const dibuiador = require('./dibuiador');
 
 class QueueManager {
-    constructor() {
-        this.queues = new Map();
-        this.connections = new Map();
-        this.players = new Map();
-        this.downloadQueue = new Map();
+  constructor() {
+    this.queues = new Map();
+    this.connections = new Map();
+    this.players = new Map();
+    this.autoPlay = new Map();
+    this.djEffects = new Map();
+
+    this.stats = {
+      errors: 0,
+      totalServers: 0
+    };
+
+    this.cleanupIntervalMs = 5 * 60 * 1000;
+    this.startCleanupInterval();
+  }
+
+  getQueue(guildId) {
+    if (!this.queues.has(guildId)) {
+      this.queues.set(guildId, {
+        songs: [],
+        isPlaying: false,
+        currentSong: null,
+        voiceChannel: null,
+        lastActivity: Date.now(),
+        lastPlayed: null
+      });
+    }
+    return this.queues.get(guildId);
+  }
+
+  getQueueInfo(guildId) {
+    const queue = this.getQueue(guildId);
+    return {
+      isPlaying: queue.isPlaying,
+      queue: queue.songs,
+      currentSong: queue.currentSong
+    };
+  }
+
+  getAutoPlay(guildId) {
+    return this.autoPlay.get(guildId) || false;
+  }
+
+  setAutoPlay(guildId, status) {
+    this.autoPlay.set(guildId, status);
+    console.log(`📻 AutoPlay ${status ? 'ATIVADO' : 'DESATIVADO'} para guild: ${guildId}`);
+  }
+
+  getDJEffects(guildId) {
+    return this.djEffects.get(guildId) || 'normal';
+  }
+
+  setDJEffects(guildId, effect) {
+    this.djEffects.set(guildId, effect);
+    
+    const player = this.getPlayer(guildId);
+    if (player && effect !== 'normal') {
+      this.applyAudioEffect(guildId, effect);
+    }
+  }
+
+  applyAudioEffect(guildId, effect) {
+    const player = this.getPlayer(guildId);
+    if (!player) return;
+
+    try {
+      const currentResource = player.state.resource;
+      if (!currentResource) return;
+
+      console.log(`🎛️ Aplicando efeito ${effect} para guild: ${guildId}`);
+      
+      switch (effect) {
+        case 'bassboost':
+          break;
+        case 'nightcore':
+          break;
+        case 'vaporwave':
+          break;
+        case 'reverse':
+          break;
+      }
+      
+    } catch (error) {
+      console.error('❌ Erro ao aplicar efeito DJ:', error);
+    }
+  }
+
+  async prepareNextAutoPlay(guildId, currentSong) {
+    const queue = this.getQueue(guildId);
+    
+    if (!this.getAutoPlay(guildId) || queue.songs.length > 3) {
+      return;
+    }
+
+    try {
+      console.log(`🎯 AutoPlay: Preparando próxima música similar a "${currentSong.title}"`);
+      
+      let similarSong = null;
+      
+      // Estratégia 1: Buscar por artista
+      const artistMatch = currentSong.title.match(/(.+?)\s+-/);
+      if (artistMatch) {
+        const artist = artistMatch[1].trim();
+        console.log(`🎤 AutoPlay: Buscando por artista "${artist}"`);
+        similarSong = await dibuiador.buscarMusica(`${artist}`);
+      }
+      
+      // Estratégia 2: Se não encontrou, buscar por gênero similar
+      if (!similarSong) {
+        console.log(`🎵 AutoPlay: Buscando música similar a "${currentSong.title}"`);
+        similarSong = await dibuiador.buscarMusica(`music similar to ${currentSong.title}`);
+      }
+      
+      // Estratégia 3: Se ainda não encontrou, buscar trending
+      if (!similarSong) {
+        console.log(`🔥 AutoPlay: Buscando música popular`);
+        similarSong = await dibuiador.buscarMusica(`popular music`);
+      }
+
+      // FILTRAR: Não adicionar a mesma música
+      if (similarSong && similarSong.videoId === currentSong.videoId) {
+        console.log('❌ AutoPlay: Música igual à atual, ignorando...');
+        return;
+      }
+      
+      // FILTRAR: Não adicionar músicas já na fila
+      if (similarSong && queue.songs.some(song => song.videoId === similarSong.videoId)) {
+        console.log('❌ AutoPlay: Música já está na fila, ignorando...');
+        return;
+      }
+
+      if (similarSong) {
+        console.log(`✅ AutoPlay: Encontrada "${similarSong.title}"`);
         
-        // 🔧 CACHE LIMIT CONFIGURÁVEL
-        this.cacheLimit = 30;
-        
-        this.cacheIndex = new Map();
-        this.cacheCounter = 0;
-        this.stats = {
-            totalDownloads: 0,
-            cacheHits: 0,
-            cacheMisses: 0,
-            errors: 0
-        };
-        
-        console.log(`🎯 Cache limit configurado para: ${this.cacheLimit} músicas`);
-    }
-
-    getQueue(guildId) {
-        if (!this.queues.has(guildId)) {
-            this.queues.set(guildId, {
-                songs: [],
-                isPlaying: false,
-                currentSong: null,
-                voiceChannel: null,
-                lastActivity: Date.now()
-            });
-        }
-        return this.queues.get(guildId);
-    }
-
-    getCacheFilePath(songInfo) {
-        const tempDir = './music_cache';
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-        }
-        
-        // 🏷️ USAR TÍTULO + VIDEO_ID COMO NOME DO ARQUIVO
-        const dibuiador = require('./dibuiador');
-        const fileName = dibuiador.encodeFileName(songInfo.title, songInfo.videoId);
-        return path.join(tempDir, `${fileName}.mp3`);
-    }
-
-    // 🔥 RESET COMPLETO DO SERVIDOR
-    resetGuild(guildId) {
-        console.log('🔄 Resetando estado do servidor:', guildId);
-        
-        // Parar player
-        const player = this.players.get(guildId);
-        if (player) {
-            player.stop();
-        }
-        
-        // Desconectar
-        const connection = this.connections.get(guildId);
-        if (connection) {
-            try {
-                connection.destroy();
-                console.log('🔌 Conexão destruída no reset');
-            } catch (error) {
-                console.log('⚠️ Erro ao destruir conexão:', error.message);
-            }
-        }
-        
-        // Limpar tudo
-        this.connections.delete(guildId);
-        this.players.delete(guildId);
-        this.queues.delete(guildId);
-        
-        console.log('✅ Reset completo do servidor');
-    }
-
-    // 🧹 LIMPEZA AUTOMÁTICA DE SERVIDORES INATIVOS
-    startCleanupInterval() {
-        setInterval(() => {
-            const now = Date.now();
-            const inactiveTime = 30 * 60 * 1000; // 30 minutos
-            
-            for (const [guildId, connection] of this.connections) {
-                const queue = this.getQueue(guildId);
-                
-                // Se não está tocando e não tem música na fila há mais de 30min
-                if (!queue.isPlaying && queue.songs.length === 0) {
-                    const lastActivity = queue.lastActivity || now;
-                    if (now - lastActivity > inactiveTime) {
-                        console.log(`🧹 Limpando servidor inativo: ${guildId}`);
-                        this.resetGuild(guildId);
-                    }
-                } else {
-                    // Atualizar timestamp de atividade
-                    queue.lastActivity = now;
-                }
-            }
-        }, 10 * 60 * 1000); // Verificar a cada 10 minutos
-    }
-
-    // ✅ VALIDAÇÃO DE ARQUIVO DE CACHE
-    async validateCacheFile(filePath) {
-        try {
-            const stats = fs.statSync(filePath);
-            
-            // Verificar se o arquivo tem tamanho razoável (> 100KB)
-            if (stats.size < 100 * 1024) {
-                console.log('🗑️ Arquivo de cache muito pequeno, removendo...');
-                fs.unlinkSync(filePath);
-                return false;
-            }
-            
-            return true;
-        } catch (error) {
-            console.log('⚠️ Erro ao validar cache:', error.message);
-            return false;
-        }
-    }
-
-    // 🔄 SISTEMA DE RETRY PARA DOWNLOADS
-    async downloadToCacheWithRetry(url, videoId, title = '', maxRetries = 3) {
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                await this.downloadToCache(url, videoId, title);
-                return true;
-            } catch (error) {
-                console.log(`❌ Tentativa ${attempt}/${maxRetries} falhou:`, error.message);
-                
-                if (attempt === maxRetries) {
-                    this.stats.errors++;
-                    throw error;
-                }
-                
-                // Esperar progressivamente mais entre tentativas
-                await new Promise(resolve => setTimeout(resolve, attempt * 2000));
-            }
-        }
-    }
-
-    async addToQueue(guildId, songInfo, voiceChannel) {
-        const queue = this.getQueue(guildId);
-        
-        // 🔥 SEMPRE ATUALIZAR O CANAL DE VOZ
-        queue.voiceChannel = voiceChannel;
-        queue.lastActivity = Date.now();
-
-        // 🏷️ AGORA O NOME DO ARQUIVO INCLUI O TÍTULO
-        const cacheFile = this.getCacheFilePath(songInfo);
-        songInfo.file = cacheFile;
-        
-        const position = queue.songs.length + 1;
-        queue.songs.push(songInfo);
-
-        console.log('🎯 Música adicionada à fila:', {
-            title: songInfo.title,
-            position: position,
-            videoId: songInfo.videoId,
-            cacheFile: path.basename(cacheFile),
-            fromCache: songInfo.fromCache || false
-        });
-
-        // ✅ SE VEIO DO CACHE, JÁ PODE TOCAR IMEDIATAMENTE
-        if (songInfo.fromCache) {
-            console.log('⚡ Música já está em cache, pronta para tocar!');
-            this.stats.cacheHits++;
-            this.cacheIndex.set(songInfo.videoId, this.cacheCounter++);
-        } else if (!fs.existsSync(cacheFile)) {
-            console.log('📥 Cache não encontrado, baixando ANTES de tocar...');
-            this.stats.cacheMisses++;
-            await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId, songInfo.title);
-        } else {
-            // Validar arquivo de cache existente
-            const isValid = await this.validateCacheFile(cacheFile);
-            if (!isValid) {
-                console.log('🔄 Cache inválido, baixando novamente...');
-                this.stats.cacheMisses++;
-                await this.downloadToCacheWithRetry(songInfo.url, songInfo.videoId, songInfo.title);
-            } else {
-                console.log('✅ MP3 já está em cache:', songInfo.title);
-                this.stats.cacheHits++;
-                this.cacheIndex.set(songInfo.videoId, this.cacheCounter++);
-            }
-        }
-
-        if (!queue.isPlaying) {
-            await this.playNextSong(guildId);
-        }
-
-        return position;
-    }
-
-    async downloadToCache(url, videoId, title = '') {
-        if (this.downloadQueue.has(videoId)) {
-            console.log('⏳ Download já em andamento para:', videoId);
-            while (this.downloadQueue.has(videoId)) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            return;
-        }
-        
-        this.downloadQueue.set(videoId, true);
-
-        try {
-            // 🏷️ CRIAR songInfo TEMPORÁRIO PARA GERAR NOME DO ARQUIVO
-            const tempSongInfo = { title: title || videoId, videoId: videoId };
-            const cacheFile = this.getCacheFilePath(tempSongInfo);
-            
-            console.log('📥 Baixando para cache permanente:', title || videoId);
-            
-            const command = `yt-dlp -x --audio-format mp3 --audio-quality 5 --extract-audio --no-playlist --no-warnings -o "${cacheFile}" "${url}"`;
-            await execPromise(command);
-            
-            this.manageCacheLimit(videoId);
-            this.stats.totalDownloads++;
-            
-            console.log('✅ Download para cache concluído:', title || videoId);
-        } catch (error) {
-            console.error('❌ Erro no download para cache:', error);
-            this.stats.errors++;
-            throw error;
-        } finally {
-            this.downloadQueue.delete(videoId);
-        }
-    }
-
-    manageCacheLimit(newVideoId) {
-        this.cacheIndex.set(newVideoId, this.cacheCounter++);
-        
-        if (this.cacheIndex.size > this.cacheLimit) {
-            let oldestVideoId = null;
-            let oldestCounter = Infinity;
-            
-            for (const [videoId, counter] of this.cacheIndex) {
-                if (counter < oldestCounter) {
-                    oldestCounter = counter;
-                    oldestVideoId = videoId;
-                }
-            }
-            
-            if (oldestVideoId) {
-                // Encontrar o arquivo correspondente no cache
-                const cacheDir = './music_cache';
-                if (fs.existsSync(cacheDir)) {
-                    const files = fs.readdirSync(cacheDir);
-                    for (const file of files) {
-                        if (file.includes(oldestVideoId)) {
-                            const oldCacheFile = path.join(cacheDir, file);
-                            try {
-                                if (fs.existsSync(oldCacheFile)) {
-                                    fs.unlinkSync(oldCacheFile);
-                                    console.log('🗑️ Removido do cache (limite excedido):', file);
-                                }
-                                this.cacheIndex.delete(oldestVideoId);
-                                break;
-                            } catch (error) {
-                                console.log('⚠️ Erro ao remover do cache:', error.message);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async playNextSong(guildId) {
-        const queue = this.getQueue(guildId);
-        const nextSong = queue.songs.shift();
-        
-        if (!nextSong) {
-            console.log('📭 Fila vazia, SAINDO DO CANAL...');
-            queue.isPlaying = false;
-            queue.currentSong = null;
-            
-            // 🔥 SAIR DO CANAL QUANDO ACABAR
-            this.cleanupConnection(guildId);
-            return;
-        }
-
-        try {
-            queue.isPlaying = true;
-            queue.currentSong = nextSong;
-            queue.lastActivity = Date.now();
-
-            // 🔥 CONECTAR AO CANAL (sempre criar nova conexão)
-            console.log('🔌 Conectando ao canal de voz...');
-            const connection = joinVoiceChannel({
-                channelId: queue.voiceChannel.id,
-                guildId: queue.voiceChannel.guild.id,
-                adapterCreator: queue.voiceChannel.guild.voiceAdapterCreator,
-            });
-            this.connections.set(guildId, connection);
-
-            await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-
-            if (!fs.existsSync(nextSong.file)) {
-                console.log('⚡ Cache não encontrado no playNextSong, baixando...');
-                try {
-                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId, nextSong.title);
-                } catch (downloadError) {
-                    console.error('❌ Download falhou:', downloadError);
-                    throw new Error('Não foi possível baixar a música');
-                }
-            } else {
-                // Validar cache antes de usar
-                const isValid = await this.validateCacheFile(nextSong.file);
-                if (!isValid) {
-                    console.log('🔄 Cache inválido, baixando novamente...');
-                    await this.downloadToCacheWithRetry(nextSong.url, nextSong.videoId, nextSong.title);
-                } else {
-                    console.log('✅ Usando cache permanente:', nextSong.title);
-                    this.cacheIndex.set(nextSong.videoId, this.cacheCounter++);
-                }
-            }
-
-            if (!fs.existsSync(nextSong.file)) {
-                throw new Error('Arquivo de áudio não foi baixado corretamente');
-            }
-
-            console.log('🎵 Criando recurso de áudio...');
-            const resource = createAudioResource(nextSong.file, {
-                inputType: 'mp3',
-                inlineVolume: true
-            });
-
-            let player = this.players.get(guildId);
-            if (!player) {
-                player = createAudioPlayer();
-                this.players.set(guildId, player);
-                connection.subscribe(player);
-            }
-
-            player.removeAllListeners();
-
-            player.on(AudioPlayerStatus.Playing, () => {
-                console.log('🎶 Tocando música!');
-                nextSong.channel.send(`🎶 | **Tocando agora:** ${nextSong.title} (por ${nextSong.requestedBy})`);
-            });
-
-            player.on('error', error => {
-                console.error('❌ Player Error:', error);
-                this.stats.errors++;
-                nextSong.channel.send('❌ Erro ao tocar música!');
-                this.cleanupConnection(guildId);
-                this.playNextSong(guildId);
-            });
-
-            player.on(AudioPlayerStatus.Idle, () => {
-                console.log('✅ Música terminou, próxima...');
-                this.playNextSong(guildId);
-            });
-
-            console.log('▶️ Iniciando reprodução...');
-            player.play(resource);
-
-        } catch (error) {
-            console.error('❌ Erro ao tocar música:', error);
-            this.stats.errors++;
-            nextSong.channel.send(`❌ Erro: ${error.message}`);
-            this.cleanupConnection(guildId);
-            this.playNextSong(guildId);
-        }
-    }
-
-    // 🔥 LIMPAR CONEXÃO
-    cleanupConnection(guildId) {
-        const connection = this.connections.get(guildId);
-        if (connection) {
-            try {
-                connection.destroy();
-                this.connections.delete(guildId);
-                this.players.delete(guildId);
-                console.log('🔌 Conexão limpa - bot saiu do canal');
-            } catch (error) {
-                console.log('🔌 Erro ao desconectar:', error.message);
-            }
-        }
-    }
-
-    skipSong(guildId) {
-        const player = this.players.get(guildId);
-        if (player) {
-            player.stop();
-            console.log('⏭️ Música pulada');
-        }
-    }
-
-    getQueueInfo(guildId) {
-        const queue = this.getQueue(guildId);
-        return {
-            current: queue.currentSong,
-            queue: queue.songs,
-            isPlaying: queue.isPlaying,
-            total: queue.songs.length + (queue.currentSong ? 1 : 0)
-        };
-    }
-
-    // 📊 ESTATÍSTICAS DO SISTEMA
-    getStats() {
-        return {
-            ...this.stats,
-            totalServers: this.queues.size,
-            totalConnections: this.connections.size,
-            totalPlayers: this.players.size,
-            cacheSize: this.cacheIndex.size,
-            cacheLimit: this.cacheLimit
-        };
-    }
-
-    // 🎮 MÉTODOS PARA CONTROLE INTERATIVO
-    getPlayer(guildId) {
-        return this.players.get(guildId);
-    }
-
-    getCurrentSong(guildId) {
-        const queue = this.getQueue(guildId);
-        return queue.currentSong;
-    }
-
-    isPaused(guildId) {
-        const player = this.players.get(guildId);
-        return player && player.state.status === 'paused';
-    }
-
-    // 📱 MÉTODO PARA CRIAR MENSAGEM DE CONTROLE
-    createControlMessage(guildId) {
-        const currentSong = this.getCurrentSong(guildId);
-        const isPaused = this.isPaused(guildId);
-        
-        if (!currentSong) return null;
-
-        const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-        
-        // Embed da música atual
-        const embed = new EmbedBuilder()
-            .setTitle('🎶 Controles de Música')
-            .setDescription(`**Tocando Agora:** ${currentSong.title}`)
-            .addFields(
-                { name: '👤 Pedido por', value: currentSong.requestedBy, inline: true },
-                { name: '🎵 Status', value: isPaused ? '⏸️ Pausada' : '▶️ Tocando', inline: true }
-            )
-            .setColor(isPaused ? '#FFA500' : '#00FF00')
-            .setTimestamp();
-
-        // Botões de controle
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('music_pause')
-                .setEmoji(isPaused ? '▶️' : '⏸️')
-                .setLabel(isPaused ? 'Continuar' : 'Pausar')
-                .setStyle(ButtonStyle.Primary),
-            
-            new ButtonBuilder()
-                .setCustomId('music_skip')
-                .setEmoji('⏭️')
-                .setLabel('Pular')
-                .setStyle(ButtonStyle.Secondary),
-            
-            new ButtonBuilder()
-                .setCustomId('music_stop')
-                .setEmoji('⏹️')
-                .setLabel('Parar')
-                .setStyle(ButtonStyle.Danger),
-            
-            new ButtonBuilder()
-                .setCustomId('music_queue')
-                .setEmoji('📋')
-                .setLabel('Fila')
-                .setStyle(ButtonStyle.Success),
-            
-            new ButtonBuilder()
-                .setCustomId('music_refresh')
-                .setEmoji('🔄')
-                .setLabel('Atualizar')
-                .setStyle(ButtonStyle.Secondary)
+        const downloadResult = await downloadManager.downloadSong(
+          similarSong.url,
+          similarSong.videoId,
+          similarSong.title
         );
 
-        return { embeds: [embed], components: [row] };
+        if (downloadResult.success) {
+          const songInfo = {
+            url: similarSong.url,
+            title: similarSong.title,
+            videoId: similarSong.videoId,
+            requestedBy: '🤖 AutoPlay',
+            channel: currentSong.channel,
+            fromCache: downloadResult.fromCache,
+            file: downloadResult.file
+          };
+
+          queue.songs.push(songInfo);
+          
+          console.log(`✅ AutoPlay: "${similarSong.title}" preparada na posição ${queue.songs.length}`);
+          
+          try {
+            await currentSong.channel.send(`🎯 | **AutoPlay:** "${similarSong.title}"`);
+          } catch (err) {
+            console.log('⚠️ Não foi possível enviar mensagem do AutoPlay');
+          }
+        }
+      } else {
+        console.log('❌ AutoPlay: Nenhuma música similar encontrada');
+      }
+    } catch (error) {
+      console.error('❌ Erro no AutoPlay preparatório:', error);
     }
+  }
+
+  getStats() {
+    this.stats.totalServers = this.queues.size;
+    const downloadStats = downloadManager.getStats();
+    return { ...this.stats, ...downloadStats };
+  }
+
+  getCacheFilePath(songInfo) {
+    return downloadManager.getCacheFilePath(songInfo.videoId, songInfo.title);
+  }
+
+  resetGuild(guildId) {
+    const player = this.players.get(guildId);
+    if (player) player.stop();
+
+    const connection = this.connections.get(guildId);
+    if (connection) {
+      try {
+        connection.destroy();
+      } catch {}
+    }
+
+    this.players.delete(guildId);
+    this.connections.delete(guildId);
+    this.queues.delete(guildId);
+    this.autoPlay.delete(guildId);
+    this.djEffects.delete(guildId);
+
+    console.log(`🔄 Resetado guild: ${guildId}`);
+  }
+
+  async addToQueue(guildId, songInfo, voiceChannel) {
+    const queue = this.getQueue(guildId);
+    queue.voiceChannel = voiceChannel;
+    queue.lastActivity = Date.now();
+
+    songInfo.file = this.getCacheFilePath(songInfo);
+
+    const position = queue.songs.length + 1;
+    queue.songs.push(songInfo);
+
+    console.log('➕ Adicionada à fila:', songInfo.title, 'pos', position);
+
+    const fileExists = downloadManager.checkFileExists(songInfo.file);
+    
+    if (fileExists) {
+      songInfo.fromCache = true;
+      console.log('✅ Arquivo encontrado no cache');
+    } else {
+      console.log('❌ Arquivo não encontrado no cache, será baixado durante reprodução');
+    }
+
+    if (!queue.isPlaying && queue.songs.length === 1) {
+      console.log('🚀 Iniciando reprodução da primeira música');
+      await this.playNextSong(guildId);
+    }
+
+    return position;
+  }
+
+  async playNextSong(guildId) {
+    const queue = this.getQueue(guildId);
+    
+    if (!queue.songs || queue.songs.length === 0) {
+      console.log('❌ Fila vazia, parando reprodução');
+      queue.isPlaying = false;
+      queue.currentSong = null;
+      
+      if (this.getAutoPlay(guildId) && queue.lastPlayed) {
+        console.log('🎯 AutoPlay: Fila vazia, buscando nova música...');
+        await this.autoPlayNext(guildId, queue.lastPlayed);
+        return;
+      }
+      
+      this.cleanupConnection(guildId);
+      return;
+    }
+
+    const nextSong = queue.songs[0];
+    console.log('🎵 Iniciando playNextSong para:', nextSong.title);
+
+    try {
+      queue.isPlaying = true;
+      queue.currentSong = nextSong;
+      queue.lastPlayed = nextSong;
+      queue.lastActivity = Date.now();
+
+      nextSong.file = this.getCacheFilePath(nextSong);
+      console.log('📁 Procurando arquivo:', nextSong.file);
+
+      if (!downloadManager.checkFileExists(nextSong.file)) {
+        console.log('❌ Arquivo não existe, baixando via DownloadManager...');
+        const downloadResult = await downloadManager.downloadSong(
+          nextSong.url, 
+          nextSong.videoId, 
+          nextSong.title
+        );
+
+        if (!downloadResult.success) {
+          throw new Error(`Falha ao baixar: ${downloadResult.error}`);
+        }
+
+        nextSong.file = downloadResult.file;
+        console.log('✅ Download concluído via DownloadManager');
+      }
+
+      if (!fs.existsSync(nextSong.file)) {
+        throw new Error(`Arquivo não existe: ${nextSong.file}`);
+      }
+
+      const fileStats = fs.statSync(nextSong.file);
+      console.log('✅ Arquivo verificado:', fileStats.size, 'bytes');
+
+      let connection = this.connections.get(guildId);
+      if (!connection) {
+        if (!queue.voiceChannel) {
+          throw new Error('Voice channel não disponível');
+        }
+
+        console.log('🔌 Conectando ao canal de voz...');
+        connection = joinVoiceChannel({
+          channelId: queue.voiceChannel.id,
+          guildId: queue.voiceChannel.guild.id,
+          adapterCreator: queue.voiceChannel.guild.voiceAdapterCreator,
+          selfDeaf: false
+        });
+
+        this.connections.set(guildId, connection);
+      }
+
+      console.log('⏳ Aguardando conexão...');
+      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      console.log('✅ Conectado e pronto');
+
+      let player = this.players.get(guildId);
+      if (!player) {
+        player = createAudioPlayer();
+        this.players.set(guildId, player);
+        connection.subscribe(player);
+        console.log('🎹 Player criado e inscrito');
+      }
+
+      const currentEffect = this.getDJEffects(guildId);
+      if (currentEffect !== 'normal') {
+        this.applyAudioEffect(guildId, currentEffect);
+      }
+
+      player.removeAllListeners();
+
+      player.on(AudioPlayerStatus.Playing, () => {
+        console.log('▶️ Música iniciada com sucesso!');
+        
+        if (this.getAutoPlay(guildId) && queue.songs.length <= 2) {
+          setTimeout(() => {
+            this.prepareNextAutoPlay(guildId, nextSong);
+          }, 5000);
+        }
+        
+        // ✅ APENAS LOG NO CONSOLE - SEM MENSAGEM NO DISCORD
+        console.log(`🎵 Tocando agora: ${nextSong.title}`);
+      });
+
+      player.on(AudioPlayerStatus.Idle, () => {
+        console.log('⏹️ Música terminou, próxima...');
+        queue.songs.shift();
+        this.playNextSong(guildId);
+      });
+
+      player.on('error', error => {
+        console.error('❌ Erro no player:', error.message);
+        this.stats.errors++;
+        queue.songs.shift();
+        this.playNextSong(guildId);
+      });
+
+      console.log('🔊 Criando audio resource...');
+      const resource = createAudioResource(nextSong.file, {
+        inlineVolume: true,
+        metadata: {
+          title: nextSong.title
+        }
+      });
+
+      console.log('🎵 Iniciando reprodução...');
+      player.play(resource);
+      console.log('✅ Comando play executado');
+
+    } catch (error) {
+      console.error('❌ Erro em playNextSong:', error.message);
+      this.stats.errors++;
+      queue.songs.shift();
+      setTimeout(() => this.playNextSong(guildId), 1000);
+    }
+  }
+
+  async autoPlayNext(guildId, lastSong) {
+    try {
+      console.log(`🎯 AutoPlay (fila vazia): Buscando música similar a "${lastSong.title}"`);
+      
+      let similarSong = null;
+      
+      const artistMatch = lastSong.title.match(/(.+?)\s+-/);
+      if (artistMatch) {
+        const artist = artistMatch[1].trim();
+        similarSong = await dibuiador.buscarMusica(`${artist}`);
+      }
+      
+      if (!similarSong) {
+        similarSong = await dibuiador.buscarMusica(`music similar to ${lastSong.title}`);
+      }
+      
+      if (!similarSong) {
+        similarSong = await dibuiador.buscarMusica(`popular music`);
+      }
+
+      if (similarSong) {
+        console.log(`✅ AutoPlay: Encontrada "${similarSong.title}"`);
+        
+        const downloadResult = await downloadManager.downloadSong(
+          similarSong.url,
+          similarSong.videoId,
+          similarSong.title
+        );
+
+        if (downloadResult.success) {
+          const songInfo = {
+            url: similarSong.url,
+            title: similarSong.title,
+            videoId: similarSong.videoId,
+            requestedBy: '🤖 AutoPlay',
+            channel: lastSong.channel,
+            fromCache: downloadResult.fromCache,
+            file: downloadResult.file
+          };
+
+          const queue = this.getQueue(guildId);
+          queue.songs.push(songInfo);
+          
+          console.log(`✅ AutoPlay: "${similarSong.title}" adicionada à fila`);
+          
+          if (!queue.isPlaying) {
+            await this.playNextSong(guildId);
+          }
+          
+          try {
+            await lastSong.channel.send(`🎯 | **AutoPlay:** "${similarSong.title}"`);
+          } catch (err) {
+            console.log('⚠️ Não foi possível enviar mensagem do AutoPlay');
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Erro no AutoPlay:', error);
+    }
+  }
+
+  cleanupConnection(guildId) {
+    const conn = this.connections.get(guildId);
+    if (conn) {
+      try {
+        conn.destroy();
+      } catch {}
+    }
+    this.connections.delete(guildId);
+    this.players.delete(guildId);
+    console.log('🔌 Conexão limpa para guild:', guildId);
+  }
+
+  getPlayer(guildId) {
+    return this.players.get(guildId);
+  }
+
+  isPaused(guildId) {
+    const player = this.getPlayer(guildId);
+    return player ? player.state.status === AudioPlayerStatus.Paused : false;
+  }
+
+  skipSong(guildId) {
+    const player = this.getPlayer(guildId);
+    if (player) {
+      player.stop();
+    }
+  }
+
+  getCurrentSong(guildId) {
+    const queue = this.getQueue(guildId);
+    return queue.currentSong;
+  }
+
+  removeFromQueue(guildId, position) {
+    const queue = this.getQueue(guildId);
+    
+    if (position < 1 || position > queue.songs.length) {
+      throw new Error('Posição inválida! Use um número entre 1 e ' + queue.songs.length);
+    }
+    
+    const removedSong = queue.songs.splice(position - 1, 1)[0];
+    return removedSong;
+  }
+
+  createControlMessage(guildId) {
+    const queue = this.getQueue(guildId);
+    const currentSong = queue.currentSong;
+    
+    if (!currentSong) {
+      return {
+        content: '❌ | Nenhuma música tocando no momento!',
+        components: []
+      };
+    }
+
+    const queueLength = queue.songs.length;
+    const isPaused = this.isPaused(guildId);
+    const autoPlayStatus = this.getAutoPlay(guildId) ? '✅' : '❌';
+    const djEffect = this.getDJEffects(guildId);
+
+    return {
+      content: `🎶 **Tocando agora:** ${currentSong.title}\n📊 **Na fila:** ${queueLength} música(s)\n🎤 **Pedido por:** ${currentSong.requestedBy}\n📻 **AutoPlay:** ${autoPlayStatus} | 🎛️ **DJ:** ${djEffect}`,
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 2,
+              label: isPaused ? '▶️ Retomar' : '⏸️ Pausar',
+              style: 1,
+              customId: 'music_pause'
+            },
+            {
+              type: 2,
+              label: '⏭️ Pular',
+              style: 1,
+              customId: 'music_skip'
+            },
+            {
+              type: 2,
+              label: '⏹️ Parar',
+              style: 4,
+              customId: 'music_stop'
+            }
+          ]
+        },
+        {
+          type: 1,
+          components: [
+            {
+              type: 2,
+              label: '📋 Ver Fila',
+              style: 2,
+              customId: 'music_queue'
+            },
+            {
+              type: 2,
+              label: '🔄 Atualizar',
+              style: 2,
+              customId: 'music_refresh'
+            }
+          ]
+        }
+      ]
+    };
+  }
+
+  startCleanupInterval() {
+    setInterval(() => {
+      const now = Date.now();
+      const inactiveTime = 30 * 60 * 1000; // 30 minutos
+      
+      for (const [guildId, queue] of this.queues.entries()) {
+        if (now - queue.lastActivity > inactiveTime) {
+          console.log(`🧹 Limpando guild inativa: ${guildId}`);
+          this.resetGuild(guildId);
+        }
+      }
+    }, this.cleanupIntervalMs);
+  }
 }
 
-module.exports = new QueueManager();
+const instance = new QueueManager();
+module.exports = instance;
+module.exports.QueueManager = QueueManager;
