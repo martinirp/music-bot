@@ -1,5 +1,30 @@
 const queueManager = require('../utils/queueManager');
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+// 🆕 FUNÇÃO PARA LIMPAR TÍTULO - CORRIGIDA
+function cleanYouTubeTitle(title) {
+    if (!title) return 'Título desconhecido';
+    
+    return title
+        .replace(/\s*\[[^\]]*\]/g, '') // Remove [videoId] e similares
+        .replace(/\s*\([^)]*\)/g, '')  // Remove (Official Video) etc
+        // 🆕 REMOVER APENAS: Não remove tudo depois do -
+        .replace(/\s*\[Official Music Video\]/gi, '')
+        .replace(/\s*\(Official Audio\)/gi, '')
+        .replace(/\s*\(Lyrics\)/gi, '')
+        .replace(/\s*\(Letra\)/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 100);
+}
+
+// 🆕 FUNÇÃO PARA FORMATAR DURAÇÃO
+function formatDuration(seconds) {
+    if (!seconds || isNaN(seconds)) return '[--:--]';
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `[${minutes}:${remainingSeconds.toString().padStart(2, '0')}]`;
+}
 
 module.exports = {
     name: 'queue',
@@ -10,212 +35,250 @@ module.exports = {
         const guildId = message.guild.id;
         const queue = queueManager.getQueue(guildId);
 
-        if (!queue?.songs?.length && !queue?.currentSong) {
+        // Verificação mais precisa do estado da fila
+        const hasCurrentSong = queue?.currentSong;
+        const hasQueueSongs = queue?.songs?.length > 0;
+        const isEmpty = !hasCurrentSong && !hasQueueSongs;
+
+        if (isEmpty) {
             return message.channel.send({
                 embeds: [
                     new EmbedBuilder()
-                        .setColor(0x95a5a6) // Cinza
+                        .setColor(0x95a5a6)
                         .setTitle('📭 Fila Vazia')
                         .setDescription('A fila de músicas está vazia no momento.')
                         .addFields({
                             name: '💡 Dica',
-                            value: 'Use `!play` para adicionar músicas à fila!',
+                            value: 'Use `#$%&*play` para adicionar músicas à fila!',
                             inline: false
                         })
                 ]
             });
         }
 
-        // Criar embed estilo Bootstrap
-        const embed = new EmbedBuilder()
-            .setColor(0x3498db) // Azul
-            .setTitle('🎵 **Music Queue**')
-            .setThumbnail('https://cdn-icons-png.flaticon.com/512/3658/3658776.png')
-            .setFooter({ text: 'Music Bot • Bootstrap Style', iconURL: client.user.displayAvatarURL() })
-            .setTimestamp();
-
-        // Música atual - Card style
-        if (queue.currentSong) {
-            // Limpar título da música atual
-            const cleanCurrentTitle = queue.currentSong.title
-                .replace(/\s*\[[^\]]*\]/g, '')
-                .replace(/\s*\([^)]*\)/g, '')
-                .replace(/\s*[-–].*$/, '')
-                .trim();
-                
-            const artistMatch = cleanCurrentTitle.match(/(.+?)\s+[-–]/);
-            const artist = artistMatch ? artistMatch[1].trim() : 'Unknown Artist';
-            const songName = cleanCurrentTitle.replace(/^.+\s[-–]\s*/, '').trim();
-
-            embed.setDescription(`
-🎶 **Now Playing** 
-\`\`\`css
-[${songName} by ${artist}]
-\`\`\`
-**👤 Requested by:** ${queue.currentSong.requestedBy}
-**📊 Queue length:** ${queue.songs?.length || 0} tracks
-
-${queue.songs?.length > 0 ? '▼ **Up Next**' : ''}
-            `);
+        // 🆕 CRIAR LISTA CORRIGIDA - SEM DUPLICAÇÃO
+        let queueDescription = '';
+        
+        // 🆕 ADICIONAR "TOCANDO AGORA" SEPARADO
+        if (hasCurrentSong) {
+            const cleanTitle = cleanYouTubeTitle(queue.currentSong.title);
+            const duration = queue.currentSong.duration ? formatDuration(queue.currentSong.duration) : '[--:--]';
+            queueDescription += `🎵 **Tocando Agora:** [${cleanTitle}](${queue.currentSong.url})\n\n`;
         }
 
-        // Próximas na fila - Bootstrap table style
-        if (queue.songs?.length > 0) {
-            const rows = [];
+        // 🆕 ADICIONAR "FILA" SEPARADO
+        queueDescription += '📋 **Fila de Reprodução:**\n';
+        
+        if (!hasQueueSongs) {
+            queueDescription += '`Nenhuma música na fila`\n';
+        } else {
+            // 🆕 MOSTRAR APENAS AS MÚSICAS DA FILA (não inclui a atual)
+            // A música atual está separada em "Tocando Agora"
+            const songsToShow = queue.songs.slice(0, 10); // Mostrar mais músicas
             
-            // Limitar para mostrar apenas as primeiras 5 músicas (devido à limitação do Discord)
-            const songsToShow = queue.songs.slice(0, 5);
-            
-            // Criar uma ActionRow para CADA música (máximo 5)
             songsToShow.forEach((song, index) => {
-                const position = index + 1;
-                const badgeColor = position <= 3 ? '🟢' : '🔵';
-                
-                // Limpar título da música
-                const cleanTitle = song.title
-                    .replace(/\s*\[[^\]]*\]/g, '')
-                    .replace(/\s*\([^)]*\)/g, '')
-                    .replace(/\s*[-–].*$/, '')
-                    .trim();
-                
-                // Criar uma linha para cada música com estilo Bootstrap
-                const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`remove_queue_${position}_${Date.now()}`)
-                        .setLabel('×')
-                        .setStyle(ButtonStyle.Danger)
-                        .setEmoji('🗑️'),
-                    new ButtonBuilder()
-                        .setCustomId(`dummy_${position}`)
-                        .setLabel(`${badgeColor} #${position} | ${cleanTitle.substring(0, 40)}${cleanTitle.length > 40 ? '...' : ''}`)
-                        .setStyle(ButtonStyle.Secondary)
-                        .setDisabled(true)
-                );
-                
-                rows.push(row);
+                const position = index + 1; // 🆕 COMEÇA NA POSIÇÃO 1
+                const duration = song.duration ? formatDuration(song.duration) : '[--:--]';
+                const cleanTitle = cleanYouTubeTitle(song.title);
+                queueDescription += `${position}. ${duration} [${cleanTitle}](${song.url})\n`;
             });
 
-            // Adicionar informação sobre músicas restantes se houver mais de 5
-            if (queue.songs.length > 5) {
-                embed.addFields({
-                    name: '📋 More Tracks',
-                    value: `...and ${queue.songs.length - 5} more tracks in queue`,
-                    inline: false
-                });
+            // 🆕 MOSTRAR CONTAGEM TOTAL SE HOUVER MAIS MÚSICAS
+            if (queue.songs.length > 10) {
+                queueDescription += `\n... e mais ${queue.songs.length - 10} música(s)`;
             }
-            
-            // Adicionar badges de status
-            embed.addFields(
-                {
-                    name: '📈 Queue Stats',
-                    value: `🟢 **Now Playing** • 🔵 **In Queue** • 🔴 **Remove**`,
-                    inline: false
-                }
+        }
+
+        // Criar componentes interativos
+        const components = [];
+
+        // Dropdown "Faça uma seleção"
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`queue_actions_${Date.now()}`)
+            .setPlaceholder('🎵 Faça uma seleção')
+            .addOptions(
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('▶️ Pular para música...')
+                    .setValue('jump_to')
+                    .setDescription('Pular para uma música específica'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('🔀 Embaralhar fila')
+                    .setValue('shuffle')
+                    .setDescription('Misturar a ordem das músicas'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('🗑️ Limpar fila')
+                    .setValue('clear')
+                    .setDescription('Remover todas as músicas da fila'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('🔁 Modo repetição')
+                    .setValue('loop')
+                    .setDescription('Alterar modo de repetição'),
+                new StringSelectMenuOptionBuilder()
+                    .setLabel('💾 Salvar fila')
+                    .setValue('save')
+                    .setDescription('Salvar esta fila como playlist')
             );
 
-            // Enviar mensagem com embed e botões
-            const queueMessage = await message.channel.send({
-                embeds: [embed],
-                components: rows
-            });
+        const selectRow = new ActionRowBuilder().addComponents(selectMenu);
+        components.push(selectRow);
 
-            // Criar collector para os botões
-            const filter = (interaction) => 
-                interaction.isButton() && 
-                interaction.customId.startsWith('remove_queue_') &&
-                interaction.message.id === queueMessage.id;
+        // Botão "cancel"
+        const buttonRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`queue_cancel_${Date.now()}`)
+                .setLabel('cancel')
+                .setStyle(ButtonStyle.Danger)
+                .setEmoji('❌')
+        );
+        components.push(buttonRow);
 
-            const collector = queueMessage.createMessageComponentCollector({ 
-                filter, 
-                time: 60000
-            });
+        // Enviar embed com componentes
+        const embed = new EmbedBuilder()
+            .setColor(0x3498db)
+            .setTitle('🎵 Fila de Reprodução')
+            .setDescription(queueDescription)
+            .setFooter({ text: 'Selecione uma ação abaixo', iconURL: client.user.displayAvatarURL() })
+            .setTimestamp();
 
-            let repliedInteractions = new Set();
+        const queueMessage = await message.channel.send({
+            embeds: [embed],
+            components: components
+        });
 
-            collector.on('collect', async (interaction) => {
-                if (repliedInteractions.has(interaction.id)) return;
-                repliedInteractions.add(interaction.id);
+        // Criar collector para interações
+        const filter = (interaction) => 
+            (interaction.isStringSelectMenu() || interaction.isButton()) &&
+            interaction.message.id === queueMessage.id;
 
+        const collector = queueMessage.createMessageComponentCollector({ 
+            filter, 
+            time: 60000 
+        });
+
+        collector.on('collect', async (interaction) => {
+            if (interaction.isButton() && interaction.customId.includes('queue_cancel')) {
+                // Ação do botão "cancel"
+                await interaction.update({
+                    embeds: [
+                        embed.setColor(0x95a5a6)
+                            .setFooter({ text: 'Fila fechada • Use #$%&*queue para abrir novamente', iconURL: client.user.displayAvatarURL() })
+                    ],
+                    components: []
+                });
+                collector.stop();
+                return;
+            }
+
+            if (interaction.isStringSelectMenu() && interaction.customId.includes('queue_actions')) {
+                const action = interaction.values[0];
+                
+                // Verificar se o usuário está em um canal de voz
                 if (!interaction.member.voice.channel) {
-                    await interaction.reply({ 
-                        content: '❌ | Você precisa estar em um canal de voz!', 
+                    await interaction.reply({
+                        content: '❌ | Você precisa estar em um canal de voz!',
                         flags: 64
                     });
                     return;
                 }
 
-                try {
-                    const position = parseInt(interaction.customId.split('_')[2]);
-                    const removedSong = queueManager.removeFromQueue(guildId, position);
-                    
-                    // Limpar título da música removida
-                    const cleanRemovedTitle = removedSong.title
-                        .replace(/\s*\[[^\]]*\]/g, '')
-                        .replace(/\s*\([^)]*\)/g, '')
-                        .replace(/\s*[-–].*$/, '')
-                        .trim();
-                    
-                    // Bootstrap-style alert
-                    await interaction.reply({ 
-                        embeds: [
-                            new EmbedBuilder()
-                                .setColor(0x2ecc71) // Verde sucesso
-                                .setTitle('✅ Removed Successfully')
-                                .setDescription(`**Track:** ${cleanRemovedTitle}`)
-                                .setFooter({ text: 'Bootstrap Alert • Success' })
-                        ],
-                        flags: 64
-                    });
-
-                    // Atualizar a mensagem da fila
-                    setTimeout(async () => {
-                        try {
-                            await queueMessage.delete();
-                            await module.exports.execute(message, client, args);
-                        } catch (error) {
-                            console.log('Erro ao atualizar fila:', error.message);
-                        }
-                    }, 1000);
-                    
-                } catch (error) {
-                    if (!interaction.replied) {
-                        await interaction.reply({ 
-                            embeds: [
-                                new EmbedBuilder()
-                                    .setColor(0xe74c3c) // Vermelho erro
-                                    .setTitle('❌ Error')
-                                    .setDescription(error.message)
-                                    .setFooter({ text: 'Bootstrap Alert • Error' })
-                            ],
+                switch (action) {
+                    case 'jump_to':
+                        await interaction.reply({
+                            content: '⏭️ | Digite `#$%&*jump <número>` para pular para uma música específica! Exemplo: `#$%&*jump 3`',
                             flags: 64
                         });
-                    }
+                        break;
+                        
+                    case 'shuffle':
+                        try {
+                            // Verificar se há músicas para embaralhar
+                            if (!hasQueueSongs || queue.songs.length <= 1) {
+                                await interaction.reply({
+                                    content: '❌ | Não há músicas suficientes na fila para embaralhar!',
+                                    flags: 64
+                                });
+                                return;
+                            }
+                            
+                            // Embaralhar a fila
+                            for (let i = queue.songs.length - 1; i > 0; i--) {
+                                const j = Math.floor(Math.random() * (i + 1));
+                                [queue.songs[i], queue.songs[j]] = [queue.songs[j], queue.songs[i]];
+                            }
+                            
+                            await interaction.reply({
+                                content: '🔀 | Fila embaralhada com sucesso!',
+                                flags: 64
+                            });
+                            // Atualizar a mensagem da fila
+                            setTimeout(() => {
+                                queueMessage.delete().catch(() => {});
+                                module.exports.execute(message, client, args);
+                            }, 1500);
+                        } catch (error) {
+                            await interaction.reply({
+                                content: '❌ | Erro ao embaralhar a fila!',
+                                flags: 64
+                            });
+                        }
+                        break;
+                        
+                    case 'clear':
+                        try {
+                            // Verificar se há músicas para limpar
+                            if (!hasQueueSongs) {
+                                await interaction.reply({
+                                    content: '❌ | A fila já está vazia!',
+                                    flags: 64
+                                });
+                                return;
+                            }
+                            
+                            // Limpar a fila
+                            queue.songs = [];
+                            
+                            await interaction.reply({
+                                content: '🗑️ | Fila limpa com sucesso!',
+                                flags: 64
+                            });
+                            // Atualizar a mensagem da fila
+                            setTimeout(() => {
+                                queueMessage.delete().catch(() => {});
+                                module.exports.execute(message, client, args);
+                            }, 1500);
+                        } catch (error) {
+                            await interaction.reply({
+                                content: '❌ | Erro ao limpar a fila!',
+                                flags: 64
+                            });
+                        }
+                        break;
+                        
+                    case 'loop':
+                        await interaction.reply({
+                            content: '🔁 | Use `#$%&*loop` para alterar o modo de repetição!',
+                            flags: 64
+                        });
+                        break;
+                        
+                    case 'save':
+                        await interaction.reply({
+                            content: '💾 | Use `#$%&*saveplaylist <nome>` para salvar esta fila como playlist!',
+                            flags: 64
+                        });
+                        break;
                 }
-            });
+            }
+        });
 
-            collector.on('end', () => {
-                queueMessage.edit({ 
-                    components: [],
-                    embeds: [
-                        embed.setColor(0x95a5a6) // Muda para cinza quando expira
-                         .setFooter({ text: 'Music Bot • Session Expired', iconURL: client.user.displayAvatarURL() })
-                    ]
-                }).catch(() => {});
-                repliedInteractions.clear();
-            });
-
-        } else {
-            // Se não há músicas na fila - Empty state
-            await message.channel.send({
+        collector.on('end', () => {
+            queueMessage.edit({ 
+                components: [],
                 embeds: [
-                    embed.setColor(0xf39c12) // Amarelo warning
-                    .addFields({
-                        name: '📭 Queue Empty',
-                        value: 'No tracks in the queue. Add some music to get started!',
-                        inline: false
-                    })
+                    embed.setColor(0x95a5a6)
+                        .setFooter({ text: 'Sessão expirada • Use #$%&*queue para abrir novamente', iconURL: client.user.displayAvatarURL() })
                 ]
-            });
-        }
+            }).catch(() => {});
+        });
     },
 };

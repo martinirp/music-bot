@@ -55,17 +55,7 @@ class Dibuiador {
         const reordenada = this.reordenarQuery(semComando);
         if (reordenada !== semComando) camadas.push(reordenada);
         
-        // Camada 4: Ordenada alfabeticamente
-        const alfabetica = this.ordenarAlfabetica(semComando);
-        if (alfabetica !== semComando) camadas.push(alfabetica);
-        
-        // Camada 5: Componentes (artista + música)
-        const componentes = this.extrairComponentes(semComando);
-        camadas.push(...componentes);
-        
-        // Camada 6: Termos chave
-        const termos = this.extrairTermosChave(semComando);
-        camadas.push(...termos);
+        // 🆕 REMOVER CAMADAS 4, 5, 6 - SÓ ATÉ CAMADA 3
         
         // Remove duplicatas
         return [...new Set(camadas.filter(c => c && c.length > 0))];
@@ -90,39 +80,6 @@ class Dibuiador {
         return query;
     }
 
-    ordenarAlfabetica(query) {
-        return query.split(' ')
-            .filter(palavra => palavra.length > 2)
-            .sort()
-            .join(' ')
-            .trim();
-    }
-
-    extrairComponentes(query) {
-        const componentes = [];
-        const palavras = query.split(' ');
-        
-        if (palavras.length >= 4) {
-            // Primeiras 2 palavras (possível artista)
-            componentes.push(palavras.slice(0, 2).join(' '));
-            // Últimas 2-3 palavras (possível música)
-            componentes.push(palavras.slice(-2).join(' '));
-            componentes.push(palavras.slice(-3).join(' '));
-        }
-        
-        return componentes.filter(c => c.length > 0);
-    }
-
-    extrairTermosChave(query) {
-        const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'de', 'da', 'do'];
-        return query.split(' ')
-            .filter(palavra => 
-                palavra.length > 2 && 
-                !stopWords.includes(palavra.toLowerCase())
-            )
-            .slice(0, 4); // Limita a 4 termos principais
-    }
-
     async buscarNoCache(query) {
         try {
             const cacheDir = './music_cache';
@@ -133,24 +90,32 @@ class Dibuiador {
 
             const fuse = new Fuse(files, {
                 includeScore: true,
-                threshold: 0.2, // 80% de similaridade
+                threshold: 0.2, // 90% de similaridade
+                ignoreLocation: true,
+                minMatchCharLength: 2
             });
 
             const result = fuse.search(query);
             if (result.length > 0) {
                 const bestMatch = result[0].item;
                 const fileName = path.basename(bestMatch, '.mp3');
+                const filePath = path.join(cacheDir, bestMatch);
                 
-                const title = fileName.split(' || ')[0]; // Pega apenas o primeiro nome
-                const videoIdMatch = fileName.match(/\[([^\]]+)\]$/);
+                const videoIdMatch = fileName.match(/\[([^\]]+)\]/);
                 const videoId = videoIdMatch ? videoIdMatch[1] : 'unknown';
+                
+                const titleParts = fileName.split(' • ');
+                let title = titleParts[0] || 'Unknown Title';
+
+                console.log(`✅ Cache encontrado: ${title} (${videoId})`);
 
                 return {
                     title: title,
                     url: `https://www.youtube.com/watch?v=${videoId}`,
                     videoId: videoId,
+                    duration: null,
                     fromCache: true,
-                    file: path.join(cacheDir, bestMatch)
+                    file: filePath
                 };
             }
             return null;
@@ -220,36 +185,6 @@ class Dibuiador {
         }
     }
 
-    async buscarMusicaSimilar(query, excludeVideoId = null) {
-        try {
-            console.log(`🔍 Buscando música similar: ${query}`);
-            
-            const searchQueries = [
-                `similar to ${query}`,
-                `music like ${query}`,
-                `${query} genre`,
-                `related to ${query}`
-            ];
-            
-            for (const searchQuery of searchQueries) {
-                try {
-                    const result = await this.buscarMusica(searchQuery);
-                    if (result && result.videoId !== excludeVideoId) {
-                        console.log(`✅ Encontrada similar: ${result.title}`);
-                        return result;
-                    }
-                } catch (error) {
-                    // Continua para a próxima estratégia
-                }
-            }
-            
-            return null;
-        } catch (error) {
-            console.error('❌ Erro ao buscar música similar:', error);
-            return null;
-        }
-    }
-
     async buscarInfoYouTube(url) {
         try {
             const command = `yt-dlp --print "%(title)s|||%(id)s|||%(duration)s" --no-playlist "${url}"`;
@@ -260,11 +195,12 @@ class Dibuiador {
             }
 
             const parts = stdout.trim().split('|||');
-            if (parts.length >= 2) {
+            if (parts.length >= 3) {
+                const duration = parts[2] ? parseInt(parts[2]) : null;
                 return {
                     title: parts[0],
                     videoId: parts[1],
-                    duration: parts[2] || '0',
+                    duration: duration,
                     url: url,
                     fromCache: false
                 };
@@ -278,24 +214,38 @@ class Dibuiador {
 
     async buscarPorTexto(query) {
         try {
+            console.log(`🎯 Buscando: "${query}"`);
+            
+            // 🆕 BUSCA DIRETA - SEM MODIFICAÇÕES
             const command = `yt-dlp "ytsearch1:${query}" --print "%(title)s|||%(id)s|||%(duration)s" --no-playlist`;
             const { stdout, stderr } = await execPromise(command);
             
-            if (stderr && !stdout) {
-                throw new Error(stderr);
+            if (stderr) {
+                console.error('❌ Erro na busca:', stderr);
+            }
+
+            if (!stdout || stdout.trim() === '') {
+                console.log('❌ Nenhum resultado encontrado');
+                return null;
             }
 
             const parts = stdout.trim().split('|||');
-            if (parts.length >= 2) {
-                return {
+            if (parts.length >= 3) {
+                const duration = parts[2] ? parseInt(parts[2]) : null;
+                const result = {
                     title: parts[0],
                     videoId: parts[1],
-                    duration: parts[2] || '0',
+                    duration: duration,
                     url: `https://www.youtube.com/watch?v=${parts[1]}`,
                     fromCache: false
                 };
+                console.log(`✅ Resultado: ${result.title}`);
+                return result;
             }
+            
+            console.log('❌ Resultado incompleto');
             return null;
+            
         } catch (error) {
             console.error('❌ Erro ao buscar por texto:', error);
             return null;

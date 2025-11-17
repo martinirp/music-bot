@@ -2,8 +2,26 @@ const queueManager = require('../utils/queueManager');
 const dibuiador = require('../utils/dibuiador');
 const downloadManager = require('../utils/download');
 const { joinVoiceChannel } = require('@discordjs/voice');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
-// 🆕 FUNÇÃO PARA DETECTAR PLAYLIST (fora do module.exports)
+// 🆕 FUNÇÃO PARA LIMPAR TÍTULO - CORRIGIDA
+function cleanYouTubeTitle(title) {
+    if (!title) return 'Unknown Title';
+    
+    return title
+        .replace(/\s*\[[^\]]*\]/g, '') // Remove [videoId] e similares
+        .replace(/\s*\([^)]*\)/g, '')  // Remove (Official Video) etc
+        // 🆕 REMOVER APENAS: Não remove tudo depois do -
+        .replace(/\s*\[Official Music Video\]/gi, '')
+        .replace(/\s*\(Official Audio\)/gi, '')
+        .replace(/\s*\(Lyrics\)/gi, '')
+        .replace(/\s*\(Letra\)/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 100);
+}
+
+// 🆕 FUNÇÃO PARA DETECTAR PLAYLIST
 function isPlaylistUrl(url) {
     return url.includes('list=') || 
            url.includes('playlist?') || 
@@ -11,61 +29,295 @@ function isPlaylistUrl(url) {
            url.includes('&start_radio=');
 }
 
-// 🆕 FUNÇÃO PARA TRATAR PLAYLIST (fora do module.exports)
+// 🆕 FUNÇÃO PARA FORMATAR DURAÇÃO
+function formatDuration(seconds) {
+    if (!seconds || isNaN(seconds)) return '[--:--]';
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `[${minutes}:${remainingSeconds.toString().padStart(2, '0')}]`;
+}
+
+// 🆕 CLASSE PARA GERENCIAR EMBED DE PLAYLIST
+class PlaylistEmbedManager {
+    constructor(message, playlistTitle, totalSongs) {
+        this.message = message;
+        this.playlistTitle = playlistTitle;
+        this.totalSongs = totalSongs;
+        this.processedSongs = 0;
+        this.addedSongs = 0;
+        this.failedSongs = 0;
+        this.currentPage = 1;
+        this.songsPerPage = 10;
+        this.embedMessage = null;
+        this.songsList = [];
+        this.collector = null;
+    }
+
+    async createInitialEmbed() {
+        const embed = new EmbedBuilder()
+            .setColor(0x3498db)
+            .setTitle('📚 Carregando Playlist...')
+            .setDescription(`**${this.playlistTitle}**\n\n🔄 Processando ${this.totalSongs} músicas...`)
+            .addFields(
+                { name: '✅ Adicionadas', value: '`0`', inline: true },
+                { name: '❌ Falhas', value: '`0`', inline: true },
+                { name: '⏳ Processadas', value: '`0/' + this.totalSongs + '`', inline: true }
+            )
+            .setFooter({ text: `Página 1/${Math.ceil(this.totalSongs / this.songsPerPage)} • Use os botões para navegar` });
+
+        const components = [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('playlist_prev')
+                    .setLabel('◀️ Anterior')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true),
+                new ButtonBuilder()
+                    .setCustomId('playlist_next')
+                    .setLabel('Próxima ▶️')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(this.totalSongs <= this.songsPerPage)
+            )
+        ];
+
+        this.embedMessage = await this.message.channel.send({
+            embeds: [embed],
+            components: components
+        });
+
+        // 🆕 CRIAR COLLECTOR PARA OS BOTÕES
+        this.createButtonCollector();
+
+        return this.embedMessage;
+    }
+
+    // 🆕 FUNÇÃO PARA CRIAR COLLECTOR DOS BOTÕES
+    createButtonCollector() {
+        this.collector = this.embedMessage.createMessageComponentCollector({
+            filter: (interaction) => 
+                interaction.customId === 'playlist_prev' || 
+                interaction.customId === 'playlist_next',
+            time: 300000 // 5 minutos
+        });
+
+        this.collector.on('collect', async (interaction) => {
+            await interaction.deferUpdate();
+
+            if (interaction.customId === 'playlist_prev') {
+                this.currentPage--;
+            } else if (interaction.customId === 'playlist_next') {
+                this.currentPage++;
+            }
+
+            await this.updateEmbedDisplay();
+        });
+
+        this.collector.on('end', () => {
+            console.log('Collector de botões da playlist finalizado');
+        });
+    }
+
+    // 🆕 FUNÇÃO PARA ATUALIZAR A EXIBIÇÃO DO EMBED (APÓS CLIQUE NOS BOTÕES)
+    async updateEmbedDisplay() {
+        const totalPages = Math.ceil(this.songsList.length / this.songsPerPage);
+        const startIndex = (this.currentPage - 1) * this.songsPerPage;
+        const endIndex = Math.min(startIndex + this.songsPerPage, this.songsList.length);
+        
+        let songsDescription = '';
+        if (this.songsList.length > 0) {
+            const currentPageSongs = this.songsList.slice(startIndex, endIndex);
+            currentPageSongs.forEach((song, index) => {
+                const globalIndex = startIndex + index + 1;
+                songsDescription += `${globalIndex}. ${song}\n`;
+            });
+        } else {
+            songsDescription = '`Processando músicas...`\n';
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(0x3498db)
+            .setTitle(this.processedSongs >= this.totalSongs ? '📚 Playlist Carregada' : '📚 Carregando Playlist...')
+            .setDescription(`**${this.playlistTitle}**\n\n${songsDescription}`)
+            .addFields(
+                { name: '✅ Adicionadas', value: `\`${this.addedSongs}\``, inline: true },
+                { name: '❌ Falhas', value: `\`${this.failedSongs}\``, inline: true },
+                { name: '⏳ Processadas', value: `\`${this.processedSongs}/${this.totalSongs}\``, inline: true }
+            )
+            .setFooter({ text: `Página ${this.currentPage}/${totalPages} • ${this.processedSongs >= this.totalSongs ? 'Concluído!' : 'Processando...'}` });
+
+        const components = [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('playlist_prev')
+                    .setLabel('◀️ Anterior')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(this.currentPage === 1),
+                new ButtonBuilder()
+                    .setCustomId('playlist_next')
+                    .setLabel('Próxima ▶️')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(this.currentPage === totalPages || this.songsList.length <= this.songsPerPage)
+            )
+        ];
+
+        await this.embedMessage.edit({
+            embeds: [embed],
+            components: components
+        });
+    }
+
+    async updateEmbed(songTitle = null, success = true) {
+        this.processedSongs++;
+        if (success) {
+            this.addedSongs++;
+            if (songTitle) {
+                this.songsList.push(songTitle);
+            }
+        } else {
+            this.failedSongs++;
+        }
+
+        await this.updateEmbedDisplay();
+    }
+
+    async completeEmbed() {
+        const embed = new EmbedBuilder()
+            .setColor(0x2ecc71)
+            .setTitle('✅ Playlist Concluída')
+            .setDescription(`**${this.playlistTitle}**\n\n✅ **${this.addedSongs}** músicas adicionadas à fila${this.failedSongs > 0 ? `\n❌ **${this.failedSongs}** falhas` : ''}`)
+            .setFooter({ text: 'Playlist carregada com sucesso!' });
+
+        // 🆕 PARAR O COLLECTOR AO FINALIZAR
+        if (this.collector) {
+            this.collector.stop();
+        }
+
+        await this.embedMessage.edit({
+            embeds: [embed],
+            components: []
+        });
+    }
+}
+
+// 🆕 FUNÇÃO PARA TRATAR PLAYLIST COM EMBED DINÂMICO (PROCESSAMENTO SEQUENCIAL)
 async function handlePlaylist(message, guildId, playlistUrl, voiceChannel) {
     try {
         console.log('📚 Carregando playlist...');
-        const loadingMsg = await message.channel.send('🔄 | Loading playlist...');
-
+        
         const playlist = await dibuiador.buscarPlaylist(playlistUrl);
         
         if (!playlist || !playlist.videos || playlist.videos.length === 0) {
-            await loadingMsg.edit('❌ | Playlist vazia ou não encontrada!');
+            await message.channel.send('❌ | Playlist vazia ou não encontrada!');
             return;
         }
+
+        // 🆕 CRIAR EMBED DINÂMICO
+        const embedManager = new PlaylistEmbedManager(
+            message, 
+            playlist.title, 
+            playlist.videos.length
+        );
+        await embedManager.createInitialEmbed();
 
         let adicionadas = 0;
         let falhas = 0;
 
-        // Adicionar cada música da playlist
-        for (const video of playlist.videos) {
+        // 🆕 PROCESSAR MÚSICAS SEQUENCIALMENTE (UMA POR VEZ)
+        for (let i = 0; i < playlist.videos.length; i++) {
+            const video = playlist.videos[i];
+            
             try {
-                const downloadResult = await downloadManager.downloadSong(
-                    video.url,
-                    video.videoId,
-                    video.title
-                );
+                // Buscar música (pode encontrar no cache)
+                const resultado = await dibuiador.buscarMusica(video.url);
+                if (!resultado) {
+                    falhas++;
+                    await embedManager.updateEmbed(null, false);
+                    continue;
+                }
 
-                if (downloadResult.success) {
-                    const songInfo = {
-                        url: video.url,
-                        title: video.title,
-                        videoId: video.videoId,
+                let songInfo;
+                
+                if (resultado.fromCache) {
+                    // Se veio do cache, usa diretamente
+                    console.log(`✅ Usando arquivo do cache: ${resultado.title}`);
+                    songInfo = {
+                        url: resultado.url,
+                        title: resultado.title,
+                        videoId: resultado.videoId,
+                        requestedBy: message.author.tag,
+                        channel: message.channel,
+                        fromCache: true,
+                        file: resultado.file
+                    };
+                } else {
+                    // Se não está no cache, faz download
+                    console.log(`📥 Baixando: ${resultado.title}`);
+                    const downloadResult = await downloadManager.downloadSong(
+                        resultado.url,
+                        resultado.videoId,
+                        resultado.title
+                    );
+
+                    if (!downloadResult.success) {
+                        falhas++;
+                        await embedManager.updateEmbed(null, false);
+                        continue;
+                    }
+
+                    songInfo = {
+                        url: resultado.url,
+                        title: resultado.title,
+                        videoId: resultado.videoId,
                         requestedBy: message.author.tag,
                         channel: message.channel,
                         fromCache: downloadResult.fromCache,
                         file: downloadResult.file
                     };
-
-                    await queueManager.addToQueue(guildId, songInfo, voiceChannel);
-                    adicionadas++;
-                } else {
-                    falhas++;
                 }
+
+                // Adicionar à fila
+                const position = await queueManager.addToQueue(guildId, songInfo, voiceChannel);
+                adicionadas++;
+
+                // 🆕 ATUALIZAR EMBED COM A MÚSICA ADICIONADA
+                const cleanTitle = cleanYouTubeTitle(resultado.title);
+                await embedManager.updateEmbed(cleanTitle, true);
+
+                // 🆕 SE É A PRIMEIRA MÚSICA, INICIAR REPRODUÇÃO IMEDIATAMENTE
+                if (i === 0 && position === 1) {
+                    console.log(`🎵 Iniciando reprodução da primeira música: ${cleanTitle}`);
+                    
+                    // Forçar início da reprodução
+                    const queue = queueManager.getQueue(guildId);
+                    if (queue && !queue.playing) {
+                        setTimeout(() => {
+                            try {
+                                queueManager.playNextSong(guildId);
+                            } catch (error) {
+                                console.error('❌ Erro ao iniciar reprodução:', error);
+                            }
+                        }, 1000);
+                    }
+                }
+
+                // 🆕 PEQUENA PAUSA ENTRE MÚSICAS PARA NÃO SOBRECARREGAR
+                if (i < playlist.videos.length - 1) {
+                    await new Promise(res => setTimeout(res, 1000));
+                }
+
             } catch (err) {
+                console.log('❌ Erro ao processar música da playlist:', err);
                 falhas++;
+                await embedManager.updateEmbed(null, false);
             }
-            
-            // Delay para não sobrecarregar
-            await new Promise(res => setTimeout(res, 500));
         }
 
-        // 🆕 MENSAGEM DISCRETA PARA PLAYLIST
-        await loadingMsg.edit(`✅ | **Playlist added:** ${adicionadas} songs to queue${falhas > 0 ? ` (${falhas} failed)` : ''}`);
+        // 🆕 FINALIZAR EMBED
+        await embedManager.completeEmbed();
 
-        // Atualizar controles se for a primeira música
+        // Atualizar controles se alguma música foi adicionada
         const queue = queueManager.getQueue(guildId);
-        if (queue?.songs?.length === adicionadas) {
+        if (adicionadas > 0) {
             setTimeout(async () => {
                 const controlManager = require('../index.js').controlManager;
                 if (controlManager) {
@@ -76,52 +328,7 @@ async function handlePlaylist(message, guildId, playlistUrl, voiceChannel) {
 
     } catch (error) {
         console.error('❌ Erro ao carregar playlist:', error);
-        
-        // Fallback: tentar como música única
-        try {
-            const resultado = await dibuiador.buscarMusica(playlistUrl);
-            if (resultado) {
-                await message.channel.send('🔁 | Playing as single track...');
-                
-                const downloadResult = await downloadManager.downloadSong(
-                    resultado.url, 
-                    resultado.videoId, 
-                    resultado.title
-                );
-
-                if (downloadResult.success) {
-                    const songInfo = {
-                        url: resultado.url,
-                        title: resultado.title,
-                        videoId: resultado.videoId,
-                        requestedBy: message.author.tag,
-                        channel: message.channel,
-                        fromCache: downloadResult.fromCache,
-                        file: downloadResult.file
-                    };
-
-                    await queueManager.addToQueue(guildId, songInfo, voiceChannel);
-                    
-                    // Mensagem discreta para fallback
-                    const artistMatch = resultado.title.match(/(.+?)\s+[-–]/);
-                    const artist = artistMatch ? artistMatch[1].trim() : 'Unknown Artist';
-                    const songName = resultado.title.replace(/^.+\s[-–]\s*/, '').trim();
-                    
-                    // 🆕 REMOVER INFORMAÇÕES TÉCNICAS DO TÍTULO
-                    const cleanSongName = songName
-                        .replace(/\s*\[[^\]]*\]/g, '') // Remove [videoId]
-                        .replace(/\s*\([^)]*\)/g, '')  // Remove (Official Video)
-                        .replace(/\s*[-–].*$/, '')     // Remove tudo depois de - ou –
-                        .trim();
-                    
-                    await message.channel.send(`**Started playing** ${cleanSongName} **by** ${artist}`);
-                }
-            } else {
-                await message.channel.send('❌ | Could not load playlist or track.');
-            }
-        } catch (fallbackError) {
-            await message.channel.send('❌ | Error processing the link.');
-        }
+        await message.channel.send('❌ | Erro ao carregar a playlist: ' + error.message);
     }
 }
 
@@ -163,7 +370,7 @@ module.exports = {
         const query = args.join(" ");
 
         try {
-            // 🆕 DETECTAR SE É PLAYLIST (usando a função externa)
+            // 🆕 DETECTAR SE É PLAYLIST
             if (isPlaylistUrl(query)) {
                 console.log('🎵 Detectada playlist, carregando...');
                 return await handlePlaylist(message, guildId, query, voiceChannel);
@@ -173,55 +380,64 @@ module.exports = {
             let resultado = await dibuiador.buscarMusica(query);
             if (!resultado) return message.channel.send('❌ | Não encontrei nada!');
 
-            const downloadResult = await downloadManager.downloadSong(
-                resultado.url, 
-                resultado.videoId, 
-                resultado.title
-            );
+            let songInfo;
 
-            if (!downloadResult.success) {
-                return message.channel.send('❌ | Erro ao baixar a música: ' + downloadResult.error);
+            // 🆕 VERIFICAR SE JÁ VEIO DO CACHE
+            if (resultado.fromCache) {
+                console.log(`✅ Usando arquivo do cache: ${resultado.title}`);
+                songInfo = {
+                    url: resultado.url,
+                    title: resultado.title,
+                    videoId: resultado.videoId,
+                    requestedBy: message.author.tag,
+                    channel: message.channel,
+                    fromCache: true,
+                    file: resultado.file
+                };
+            } else {
+                // Se não está no cache, faz download
+                const downloadResult = await downloadManager.downloadSong(
+                    resultado.url, 
+                    resultado.videoId, 
+                    resultado.title
+                );
+
+                if (!downloadResult.success) {
+                    return message.channel.send('❌ | Erro ao baixar a música: ' + downloadResult.error);
+                }
+
+                songInfo = {
+                    url: resultado.url,
+                    title: resultado.title,
+                    videoId: resultado.videoId,
+                    requestedBy: message.author.tag,
+                    channel: message.channel,
+                    fromCache: downloadResult.fromCache,
+                    file: downloadResult.file
+                };
             }
-
-            const songInfo = {
-                url: resultado.url,
-                title: resultado.title,
-                videoId: resultado.videoId,
-                requestedBy: message.author.tag,
-                channel: message.channel,
-                fromCache: downloadResult.fromCache,
-                file: downloadResult.file
-            };
 
             const position = await queueManager.addToQueue(guildId, songInfo, voiceChannel);
             
-            // 🆕 MENSAGEM DISCRETA - apenas se for a primeira da fila
-            const queue = queueManager.getQueue(guildId);
+            // 🆕 SEMPRE USAR EMBED, MESMO QUANDO NÃO É A PRIMEIRA MÚSICA
+            const cleanTitle = cleanYouTubeTitle(resultado.title);
+            let embedDescription;
+            
             if (position === 1) {
-                // 🎵 Formato discreto: "Started playing Música by Artista"
-                const artistMatch = resultado.title.match(/(.+?)\s+[-–]/);
-                const artist = artistMatch ? artistMatch[1].trim() : 'Unknown Artist';
-                const songName = resultado.title.replace(/^.+\s[-–]\s*/, '').trim();
-                
-                // 🆕 REMOVER INFORMAÇÕES TÉCNICAS DO TÍTULO
-                const cleanSongName = songName
-                    .replace(/\s*\[[^\]]*\]/g, '') // Remove [videoId]
-                    .replace(/\s*\([^)]*\)/g, '')  // Remove (Official Video)
-                    .replace(/\s*[-–].*$/, '')     // Remove tudo depois de - ou –
-                    .trim();
-                
-                await message.channel.send(`**Started playing** ${cleanSongName} **by** ${artist}`);
+                embedDescription = `🎵 **Tocando Agora:** [${cleanTitle}](${resultado.url})`;
             } else {
-                // Se não for a primeira, mensagem ainda mais discreta
-                const cleanTitle = resultado.title
-                    .replace(/\s*\[[^\]]*\]/g, '')
-                    .replace(/\s*\([^)]*\)/g, '')
-                    .replace(/\s*[-–].*$/, '')
-                    .trim();
-                
-                await message.channel.send(`✅ | **${cleanTitle}** added to queue (#${position})`);
+                embedDescription = `✅ **Adicionado à fila:** [${cleanTitle}](${resultado.url})\n📊 **Posição:** #${position}`;
             }
 
+            const embed = new EmbedBuilder()
+                .setColor(position === 1 ? 0x3498db : 0x2ecc71) // Azul para "tocando agora", verde para "adicionado"
+                .setDescription(embedDescription)
+                .setFooter({ text: `Pedido por ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
+                .setTimestamp();
+
+            await message.channel.send({ embeds: [embed] });
+
+            const queue = queueManager.getQueue(guildId);
             if (queue?.songs?.length === 1) {
                 setTimeout(async () => {
                     const controlManager = require('../index.js').controlManager;
@@ -237,3 +453,4 @@ module.exports = {
         }
     }
 };
+

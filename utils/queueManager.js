@@ -162,7 +162,7 @@ class QueueManager {
             requestedBy: '🤖 AutoPlay',
             channel: currentSong.channel,
             fromCache: downloadResult.fromCache,
-            file: downloadResult.file
+            file: downloadResult.file // 🆕 USAR FILE DO DOWNLOAD
           };
 
           queue.songs.push(songInfo);
@@ -187,10 +187,6 @@ class QueueManager {
     this.stats.totalServers = this.queues.size;
     const downloadStats = downloadManager.getStats();
     return { ...this.stats, ...downloadStats };
-  }
-
-  getCacheFilePath(songInfo) {
-    return downloadManager.getCacheFilePath(songInfo.videoId, songInfo.title);
   }
 
   resetGuild(guildId) {
@@ -218,12 +214,14 @@ class QueueManager {
     queue.voiceChannel = voiceChannel;
     queue.lastActivity = Date.now();
 
-    songInfo.file = this.getCacheFilePath(songInfo);
-
+    // 🆕 NÃO GERAR O NOME DO ARQUIVO AQUI - usar o file que já vem do download
+    // songInfo.file já deve vir preenchido pelo downloadManager com o caminho correto
+    
     const position = queue.songs.length + 1;
     queue.songs.push(songInfo);
 
     console.log('➕ Adicionada à fila:', songInfo.title, 'pos', position);
+    console.log('📁 Arquivo:', songInfo.file); // 🆕 LOG PARA DEBUG
 
     const fileExists = downloadManager.checkFileExists(songInfo.file);
     
@@ -262,6 +260,7 @@ class QueueManager {
 
     const nextSong = queue.songs[0];
     console.log('🎵 Iniciando playNextSong para:', nextSong.title);
+    console.log('📁 Arquivo esperado:', nextSong.file); // 🆕 LOG PARA DEBUG
 
     try {
       queue.isPlaying = true;
@@ -269,23 +268,26 @@ class QueueManager {
       queue.lastPlayed = nextSong;
       queue.lastActivity = Date.now();
 
-      nextSong.file = this.getCacheFilePath(nextSong);
-      console.log('📁 Procurando arquivo:', nextSong.file);
+      // 🆕 USAR O FILE QUE JÁ VEM DA MÚSICA, NÃO GERAR NOVAMENTE
+      console.log('📁 Verificando arquivo:', nextSong.file);
 
       if (!downloadManager.checkFileExists(nextSong.file)) {
-        console.log('❌ Arquivo não existe, baixando via DownloadManager...');
-        const downloadResult = await downloadManager.downloadSong(
-          nextSong.url, 
-          nextSong.videoId, 
-          nextSong.title
+        console.log('❌ Arquivo não existe, tentando encontrar por videoId...');
+        
+        // 🆕 TENTAR ENCONTRAR O ARQUIVO PELO VIDEOID
+        const files = fs.readdirSync('./music_cache');
+        const videoId = nextSong.videoId;
+        const matchingFiles = files.filter(f => 
+          f.includes(videoId) && f.endsWith('.mp3')
         );
-
-        if (!downloadResult.success) {
-          throw new Error(`Falha ao baixar: ${downloadResult.error}`);
+        
+        if (matchingFiles.length > 0) {
+          const foundFile = matchingFiles[0];
+          nextSong.file = path.join('./music_cache', foundFile);
+          console.log(`✅ Arquivo encontrado: ${foundFile}`);
+        } else {
+          throw new Error(`Arquivo não existe: ${nextSong.file}`);
         }
-
-        nextSong.file = downloadResult.file;
-        console.log('✅ Download concluído via DownloadManager');
       }
 
       if (!fs.existsSync(nextSong.file)) {
@@ -414,7 +416,7 @@ class QueueManager {
             requestedBy: '🤖 AutoPlay',
             channel: lastSong.channel,
             fromCache: downloadResult.fromCache,
-            file: downloadResult.file
+            file: downloadResult.file // 🆕 USAR FILE DO DOWNLOAD
           };
 
           const queue = this.getQueue(guildId);
@@ -482,6 +484,31 @@ class QueueManager {
     return removedSong;
   }
 
+  // 🆕 FUNÇÃO PARA LIMPAR TÍTULO - CORRIGIDA
+  cleanYouTubeTitle(title) {
+    if (!title) return 'Título desconhecido';
+    
+    return title
+      .replace(/\s*\[[^\]]*\]/g, '') // Remove [videoId] e similares
+      .replace(/\s*\([^)]*\)/g, '')  // Remove (Official Video) etc
+      // 🆕 REMOVER APENAS: Não remove tudo depois do -
+      .replace(/\s*\[Official Music Video\]/gi, '')
+      .replace(/\s*\(Official Audio\)/gi, '')
+      .replace(/\s*\(Lyrics\)/gi, '')
+      .replace(/\s*\(Letra\)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 100);
+  }
+
+  // 🆕 FUNÇÃO PARA FORMATAR DURAÇÃO
+  formatDuration(seconds) {
+    if (!seconds || isNaN(seconds)) return '[--:--]';
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `[${minutes}:${remainingSeconds.toString().padStart(2, '0')}]`;
+  }
+
   createControlMessage(guildId) {
     const queue = this.getQueue(guildId);
     const currentSong = queue.currentSong;
@@ -493,55 +520,70 @@ class QueueManager {
       };
     }
 
-    const queueLength = queue.songs.length;
+    // 🆕 CRIAR LISTA DA FILA (apenas próximas músicas)
+    let queueList = '';
+    const queueSongs = queue.songs.slice(0, 8); // Mostrar até 8 músicas
+    
+    if (queueSongs.length === 0) {
+      queueList = '`Nenhuma música na fila`\n';
+    } else {
+      queueSongs.forEach((song, index) => {
+        const position = index + 1;
+        const duration = song.duration ? this.formatDuration(song.duration) : '[--:--]';
+        const cleanTitle = this.cleanYouTubeTitle(song.title);
+        queueList += `${position}. ${duration} [${cleanTitle}](${song.url})\n`;
+      });
+      
+      if (queue.songs.length > 8) {
+        queueList += `\n... e mais ${queue.songs.length - 8} música(s)`;
+      }
+    }
+
     const isPaused = this.isPaused(guildId);
     const autoPlayStatus = this.getAutoPlay(guildId) ? '✅' : '❌';
     const djEffect = this.getDJEffects(guildId);
 
+    // 🆕 EMBED SIMPLES APENAS COM A FILA
+    const embed = {
+      color: 0x3498db,
+      description: `🎵 **Tocando Agora:** [${this.cleanYouTubeTitle(currentSong.title)}](${currentSong.url})\n\n📋 **Próximas na fila:**\n${queueList}`,
+      footer: {
+        text: `Pedido por ${currentSong.requestedBy} • AutoPlay: ${autoPlayStatus} • DJ: ${djEffect}`,
+        icon_url: 'https://cdn.discordapp.com/emojis/🎵.png'
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    // 🆕 COMPONENTES SIMPLES
+    const components = [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            label: isPaused ? '▶️ Retomar' : '⏸️ Pausar',
+            style: 1,
+            customId: 'music_pause'
+          },
+          {
+            type: 2,
+            label: '⏭️ Pular',
+            style: 1,
+            customId: 'music_skip'
+          },
+          {
+            type: 2,
+            label: '⏹️ Parar',
+            style: 4,
+            customId: 'music_stop'
+          }
+        ]
+      }
+    ];
+
     return {
-      content: `🎶 **Tocando agora:** ${currentSong.title}\n📊 **Na fila:** ${queueLength} música(s)\n🎤 **Pedido por:** ${currentSong.requestedBy}\n📻 **AutoPlay:** ${autoPlayStatus} | 🎛️ **DJ:** ${djEffect}`,
-      components: [
-        {
-          type: 1,
-          components: [
-            {
-              type: 2,
-              label: isPaused ? '▶️ Retomar' : '⏸️ Pausar',
-              style: 1,
-              customId: 'music_pause'
-            },
-            {
-              type: 2,
-              label: '⏭️ Pular',
-              style: 1,
-              customId: 'music_skip'
-            },
-            {
-              type: 2,
-              label: '⏹️ Parar',
-              style: 4,
-              customId: 'music_stop'
-            }
-          ]
-        },
-        {
-          type: 1,
-          components: [
-            {
-              type: 2,
-              label: '📋 Ver Fila',
-              style: 2,
-              customId: 'music_queue'
-            },
-            {
-              type: 2,
-              label: '🔄 Atualizar',
-              style: 2,
-              customId: 'music_refresh'
-            }
-          ]
-        }
-      ]
+      embeds: [embed],
+      components: components
     };
   }
 
